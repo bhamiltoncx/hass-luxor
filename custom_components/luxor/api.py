@@ -1,11 +1,15 @@
 """Luxor API client that uses Home Assistant's shared aiohttp session."""
 
 import asyncio
+import logging
+import time
 from typing import Any
 
 import aiohttp
 import luxor_openapi_asyncio
 from luxor_openapi_asyncio import rest
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class SharedSessionRESTClient(rest.RESTClientObject):
@@ -28,15 +32,39 @@ class SharedSessionRESTClient(rest.RESTClientObject):
         # The library limited its connector to this many parallel requests.
         self._request_limit = asyncio.Semaphore(configuration.connection_pool_maxsize)
 
-    async def request(self, *args: Any, **kwargs: Any) -> rest.RESTResponse:
+    async def request(
+        self, method: str, url: str, *args: Any, **kwargs: Any
+    ) -> rest.RESTResponse:
         async with self._request_limit:
             try:
-                return await super().request(*args, **kwargs)
+                return await self._send(method, url, *args, **kwargs)
             except aiohttp.ServerDisconnectedError:
                 # The controller now and then accepts a connection and closes
                 # it without answering. Every API call is a POST, which aiohttp
                 # won't resend on its own, so try once more.
-                return await super().request(*args, **kwargs)
+                _LOGGER.debug("%s %s: retrying", method, url)
+                return await self._send(method, url, *args, **kwargs)
+
+    async def _send(
+        self, method: str, url: str, *args: Any, **kwargs: Any
+    ) -> rest.RESTResponse:
+        """Send one request, logging how it went and how long it took."""
+        start = time.monotonic()
+        try:
+            response = await super().request(method, url, *args, **kwargs)
+        except Exception as err:
+            _LOGGER.debug(
+                "%s %s: failed after %.2fs: %r",
+                method,
+                url,
+                time.monotonic() - start,
+                err,
+            )
+            raise
+        _LOGGER.debug(
+            "%s %s: %s in %.2fs", method, url, response.status, time.monotonic() - start
+        )
+        return response
 
     async def close(self) -> None:
         """Leave the shared session open; its owner closes it."""

@@ -2,6 +2,8 @@
 
 import asyncio
 from collections.abc import AsyncIterator
+import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -114,7 +116,7 @@ async def test_client_sends_one_request_at_a_time(
 
 
 async def test_client_retries_dropped_request_once(
-    hass: HomeAssistant, controller: FakeController
+    hass: HomeAssistant, controller: FakeController, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A request the controller drops unanswered is sent again."""
     controller.drop_requests = 1
@@ -122,10 +124,25 @@ async def test_client_retries_dropped_request_once(
         create_api_client(controller.host, async_get_clientsession(hass))
     )
 
-    response = await api.controller_name()
+    with caplog.at_level(logging.DEBUG, logger="custom_components.luxor.api"):
+        response = await api.controller_name()
 
     assert response.controller == CONTROLLER_NAME
     assert controller.paths == ["/ControllerName.json"] * 2
+    url = re.escape("POST http://{}/ControllerName.json".format(controller.host))
+    patterns = [
+        url + r": failed after \d+\.\d\ds: ServerDisconnectedError\(",
+        url + r": retrying$",
+        url + r": 200 in \d+\.\d\ds$",
+    ]
+    messages = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "custom_components.luxor.api"
+    ]
+    assert len(messages) == len(patterns)
+    for pattern, message in zip(patterns, messages):
+        assert re.match(pattern, message), message
 
 
 async def test_client_gives_up_after_second_drop(
