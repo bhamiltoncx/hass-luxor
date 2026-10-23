@@ -30,7 +30,13 @@ class SharedSessionRESTClient(rest.RESTClientObject):
 
     async def request(self, *args: Any, **kwargs: Any) -> rest.RESTResponse:
         async with self._request_limit:
-            return await super().request(*args, **kwargs)
+            try:
+                return await super().request(*args, **kwargs)
+            except aiohttp.ServerDisconnectedError:
+                # The controller now and then accepts a connection and closes
+                # it without answering. Every API call is a POST, which aiohttp
+                # won't resend on its own, so try once more.
+                return await super().request(*args, **kwargs)
 
     async def close(self) -> None:
         """Leave the shared session open; its owner closes it."""

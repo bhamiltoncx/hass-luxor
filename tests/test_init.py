@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
+import aiohttp
 from aiohttp import web
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
@@ -28,10 +29,18 @@ class FakeController:
     in_flight: int = 0
     max_in_flight: int = 0
     response_delay: float = 0.0
+    drop_requests: int = 0
     paths: list[str] = field(default_factory=list)
 
     async def handle(self, request: web.Request) -> web.Response:
         self.paths.append(request.path)
+        if self.drop_requests:
+            # The real controller occasionally accepts a connection and closes
+            # it without answering.
+            self.drop_requests -= 1
+            assert request.transport is not None
+            request.transport.close()
+            return web.Response()
         self.in_flight += 1
         self.max_in_flight = max(self.max_in_flight, self.in_flight)
         try:
@@ -102,6 +111,36 @@ async def test_client_sends_one_request_at_a_time(
 
     assert [r.controller for r in responses] == [CONTROLLER_NAME] * 3
     assert controller.max_in_flight == 1
+
+
+async def test_client_retries_dropped_request_once(
+    hass: HomeAssistant, controller: FakeController
+) -> None:
+    """A request the controller drops unanswered is sent again."""
+    controller.drop_requests = 1
+    api = controller_api.ControllerApi(
+        create_api_client(controller.host, async_get_clientsession(hass))
+    )
+
+    response = await api.controller_name()
+
+    assert response.controller == CONTROLLER_NAME
+    assert controller.paths == ["/ControllerName.json"] * 2
+
+
+async def test_client_gives_up_after_second_drop(
+    hass: HomeAssistant, controller: FakeController
+) -> None:
+    """A controller that keeps dropping requests still raises."""
+    controller.drop_requests = 2
+    api = controller_api.ControllerApi(
+        create_api_client(controller.host, async_get_clientsession(hass))
+    )
+
+    with pytest.raises(aiohttp.ServerDisconnectedError):
+        await api.controller_name()
+
+    assert controller.paths == ["/ControllerName.json"] * 2
 
 
 async def test_close_leaves_shared_session_open(
